@@ -15,6 +15,7 @@ module dodo;
 import std::io;
 import milktea;
 import glaze;
+import xray;
 
 enum Screen : int { LISTS, ITEMS, SETUP }
 enum Mode : int { NORMAL, EDIT }
@@ -32,6 +33,8 @@ struct App {
 	int item_scroll;
 	int width;
 	int height;
+	int theme_idx;
+	xray::ScreenBuffer* canvas; // the cell grid we paint each frame into
 }
 
 fn String App.data_dir(App* self) => data_dir(self.storage);
@@ -42,6 +45,10 @@ fn milktea::Cmd App.init(App* self) @dynamic {
 	self.lists.init(mem);
 	self.width = 80;
 	self.height = 24;
+
+	int ti = 0;
+	if (load_theme_idx(&ti)) self.theme_idx = ti;
+	g_theme = get_theme(self.theme_idx);
 
 	Storage s;
 	if (load_pref(&s)) {
@@ -67,6 +74,14 @@ fn void App.use_storage(App* self, Storage s) {
 	self.list_cursor = 0;
 }
 
+fn void App.on_destroy(App* self) @dynamic {
+	if (self.canvas != null) {
+		self.canvas.destroy();
+		mem::free(self.canvas);
+		self.canvas = null;
+	}
+}
+
 fn milktea::Cmd App.update(App* self, milktea::Msg msg) @dynamic {
 	if (msg.kind == milktea::MsgKind.WINDOW_SIZE) {
 		self.width = msg.window_size.width;
@@ -89,7 +104,6 @@ fn milktea::Cmd App.update(App* self, milktea::Msg msg) @dynamic {
 		save_all(self.data_dir(), &self.lists);
 		return null;
 	}
-
 	if (self.screen == Screen.ITEMS) return self.update_items(k);
 	return self.update_lists(k);
 }
@@ -143,14 +157,16 @@ fn milktea::Cmd App.update_lists(App* self, milktea::KeyMsg k) {
 		return null;
 	}
 
+	// Cursor moves over the lists plus a trailing "create new list" row at
+	// index n (so the reachable range is 0..n inclusive).
 	int n = self.list_count();
 	switch (k.code) {
 		case milktea::KeyCode.UP:
 			if (self.list_cursor > 0) self.list_cursor--;
 		case milktea::KeyCode.DOWN:
-			if (self.list_cursor < n - 1) self.list_cursor++;
+			if (self.list_cursor < n) self.list_cursor++;
 		case milktea::KeyCode.ENTER:
-			if (n > 0) self.open_list(self.list_cursor);
+			self.activate_list_row();
 		case milktea::KeyCode.ESC:
 			save_all(self.data_dir(), &self.lists);
 			return milktea::quit();
@@ -159,16 +175,29 @@ fn milktea::Cmd App.update_lists(App* self, milktea::KeyMsg k) {
 				case 'q':
 					save_all(self.data_dir(), &self.lists);
 					return milktea::quit();
-				case 'j': if (self.list_cursor < n - 1) self.list_cursor++;
+				case 'j': if (self.list_cursor < n) self.list_cursor++;
 				case 'k': if (self.list_cursor > 0) self.list_cursor--;
 				case 'n': self.new_list();
-				case 'r': if (n > 0) self.mode = Mode.EDIT;
-				case 'd': self.delete_list();
+				case 'r': if (self.list_cursor < n) self.mode = Mode.EDIT;
+				case 'd': if (self.list_cursor < n) self.delete_list();
+				case 't':
+					self.theme_idx = (self.theme_idx + 1) % 11;
+					g_theme = get_theme(self.theme_idx);
+					save_theme_idx(self.theme_idx);
 				default:
 			}
 		default:
 	}
 	return null;
+}
+
+// Enter on a list opens it; Enter on the trailing "create new list" row makes one.
+fn void App.activate_list_row(App* self) {
+	if (self.list_cursor >= self.list_count()) {
+		self.new_list();
+	} else {
+		self.open_list(self.list_cursor);
+	}
 }
 
 fn void App.new_list(App* self) {
@@ -356,124 +385,370 @@ fn void finish_name(TodoList* tl) @local {
 	if (tl.name.len() == 0) tl.name.append_string("Untitled");
 }
 
+// --- theme -----------------------------------------------------------------
+
+struct Theme {
+	String name;
+	String title;
+	String cursor;
+	String item;
+	String check;
+	String done;
+	String hint;
+	String border;
+	String border2; // if set, border colour gradient end (top→bottom)
+	String bg;      // if set, fill canvas background with this colour
+	String bg2;     // if set, gradient from bg → bg2 (top→bottom)
+	String[8] list;
+}
+
+Theme g_theme; // active theme; set once in init and on theme cycle
+
+fn Theme get_theme(int idx) @local {
+	Theme t;
+	// Default: Dusk
+	t.name = "Dusk";
+	t.title = "#ffd75f"; t.cursor = "#ff5fd7"; t.item   = "#cccccc";
+	t.check = "#87ff87"; t.done   = "#5f875f"; t.hint   = "#888888"; t.border = "#5f0087";
+	t.list[0]="#cc1166"; t.list[1]="#1166cc"; t.list[2]="#118844"; t.list[3]="#aa5500";
+	t.list[4]="#7711cc"; t.list[5]="#117799"; t.list[6]="#cc4411"; t.list[7]="#9911aa";
+	switch (idx % 11) {
+		case 1: // Ocean
+			t.name = "Ocean";
+			t.title = "#87d7ff"; t.cursor = "#00d7d7"; t.item   = "#afd7e7";
+			t.check = "#5fffaf"; t.done   = "#5f8787"; t.hint   = "#6087af";
+			t.border = "#003d5f"; t.border2 = "#005f87";
+			t.bg = "#001a2e"; t.bg2 = "#002a40";
+			t.list[0]="#0055aa"; t.list[1]="#0066aa"; t.list[2]="#005588"; t.list[3]="#004477";
+			t.list[4]="#115599"; t.list[5]="#006677"; t.list[6]="#004488"; t.list[7]="#005566";
+		case 2: // Forest
+			t.name = "Forest";
+			t.title = "#afff87"; t.cursor = "#5fff87"; t.item   = "#c0d7c0";
+			t.check = "#ffff87"; t.done   = "#4f7f4f"; t.hint   = "#7f9070"; t.border = "#005f00";
+			t.list[0]="#226622"; t.list[1]="#117733"; t.list[2]="#1a7030"; t.list[3]="#336611";
+			t.list[4]="#228811"; t.list[5]="#116644"; t.list[6]="#337722"; t.list[7]="#225511";
+		case 3: // Sunset
+			t.name = "Sunset";
+			t.title = "#ffaf5f"; t.cursor = "#ff7755"; t.item   = "#d7c8b0";
+			t.check = "#ffff5f"; t.done   = "#875f3f"; t.hint   = "#907870";
+			t.border = "#6a2200"; t.border2 = "#994400";
+			t.bg = "#1a0800"; t.bg2 = "#2a1000";
+			t.list[0]="#cc4400"; t.list[1]="#994400"; t.list[2]="#aa2211"; t.list[3]="#aa5500";
+			t.list[4]="#bb3311"; t.list[5]="#aa4411"; t.list[6]="#883300"; t.list[7]="#995522";
+		case 4: // Nord
+			t.name = "Nord";
+			t.title = "#88c0d0"; t.cursor = "#81a1c1"; t.item   = "#d8dee9";
+			t.check = "#a3be8c"; t.done   = "#4c566a"; t.hint   = "#7282aa"; t.border = "#3b4252";
+			t.list[0]="#3d608e"; t.list[1]="#2e6e80"; t.list[2]="#2e6262"; t.list[3]="#3e6230";
+			t.list[4]="#6a5018"; t.list[5]="#703c28"; t.list[6]="#8a2830"; t.list[7]="#5a2e6a";
+		case 5: // Dracula
+			t.name = "Dracula";
+			t.title = "#f1fa8c"; t.cursor = "#ff79c6"; t.item   = "#f8f8f2";
+			t.check = "#50fa7b"; t.done   = "#6272a4"; t.hint   = "#7282b4"; t.border = "#6272a4";
+			t.list[0]="#6a30cc"; t.list[1]="#aa2888"; t.list[2]="#cc2222"; t.list[3]="#884c10";
+			t.list[4]="#6a6a10"; t.list[5]="#0a8a30"; t.list[6]="#1a6688"; t.list[7]="#3a4a88";
+		case 6: // Mono
+			t.name = "Mono";
+			t.title = "#ffffff"; t.cursor = "#c0c0c0"; t.item   = "#aaaaaa";
+			t.check = "#e0e0e0"; t.done   = "#666666"; t.hint   = "#707070"; t.border = "#484848";
+			t.list[0]="#505050"; t.list[1]="#585858"; t.list[2]="#484848"; t.list[3]="#606060";
+			t.list[4]="#4a4a4a"; t.list[5]="#545454"; t.list[6]="#5c5c5c"; t.list[7]="#464646";
+		case 7: // Hot Pink — gradient bg, white text
+			t.name = "Hot Pink";
+			t.title = "#ffffff"; t.cursor = "#ffff00"; t.item   = "#ffe0f0";
+			t.check = "#00ffaa"; t.done   = "#cc66aa"; t.hint   = "#ffaacc";
+			t.border = "#aa0055"; t.border2 = "#8800cc";
+			t.bg = "#880044"; t.bg2 = "#550077";
+			t.list[0]="#aa0044"; t.list[1]="#880088"; t.list[2]="#660099"; t.list[3]="#990033";
+			t.list[4]="#7700aa"; t.list[5]="#aa0066"; t.list[6]="#550088"; t.list[7]="#880055";
+		case 8: // Solar — gold-to-orange bg, crimson text
+			t.name = "Solar";
+			t.title = "#8b0000"; t.cursor = "#cc0000"; t.item   = "#3a0000";
+			t.check = "#005500"; t.done   = "#7a3300"; t.hint   = "#660000";
+			t.border = "#8b0000"; t.border2 = "#aa3300";
+			t.bg = "#cc8800"; t.bg2 = "#aa5500";
+			t.list[0]="#7a0000"; t.list[1]="#5a1100"; t.list[2]="#882200"; t.list[3]="#440000";
+			t.list[4]="#993300"; t.list[5]="#660011"; t.list[6]="#773300"; t.list[7]="#881100";
+		case 9: // Midnight — deep dark, neon gradient border, electric text
+			t.name = "Midnight";
+			t.title = "#00ffff"; t.cursor = "#ff00ff"; t.item   = "#aaaaff";
+			t.check = "#00ff88"; t.done   = "#4444aa"; t.hint   = "#6666cc";
+			t.border = "#003388"; t.border2 = "#660088";
+			t.bg = "#000011"; t.bg2 = "#0a0022";
+			t.list[0]="#0044cc"; t.list[1]="#550099"; t.list[2]="#006688"; t.list[3]="#004499";
+			t.list[4]="#660066"; t.list[5]="#003377"; t.list[6]="#440088"; t.list[7]="#005588";
+		case 10: // Vaporwave — purple-to-teal bg, pink & cyan
+			t.name = "Vaporwave";
+			t.title = "#ff71ce"; t.cursor = "#01cdfe"; t.item   = "#b967ff";
+			t.check = "#05ffa1"; t.done   = "#4a0080"; t.hint   = "#9955cc";
+			t.border = "#cc44aa"; t.border2 = "#0088cc";
+			t.bg = "#110022"; t.bg2 = "#001e22";
+			t.list[0]="#6600aa"; t.list[1]="#005588"; t.list[2]="#880055"; t.list[3]="#004466";
+			t.list[4]="#770088"; t.list[5]="#006655"; t.list[6]="#550077"; t.list[7]="#0055aa";
+		default:
+	}
+	return t;
+}
+
 // --- per-list colour -------------------------------------------------------
 
 struct ListColor {
 	String bg;
-	String fg; // a readable text colour for that background
+	String fg;
 }
 
-// A stable colour for a list, chosen from a small palette by hashing the name.
-// The hash is kept bounded (C3 safe builds trap on integer overflow).
 fn ListColor list_color(String name) @local {
-	String[8] bg = {
-		"#d75f5f", "#5f87d7", "#5faf5f", "#d7af5f",
-		"#af5fd7", "#5fd7d7", "#d787af", "#8787d7",
-	};
-	String[8] fg = {
-		"#ffffff", "#ffffff", "#000000", "#000000",
-		"#ffffff", "#000000", "#000000", "#ffffff",
-	};
 	uint h = 0;
 	foreach (char c : name) h = (h * 31 + (uint)c) % 1000003;
-	uint i = h % 8;
-	return { bg[i], fg[i] };
+	return { g_theme.list[h % 8], "#ffffff" };
 }
 
-// --- view ------------------------------------------------------------------
+// --- styles ----------------------------------------------------------------
+
+fn glaze::Style sty_title()  => glaze::new_style().foreground(glaze::color_hex(g_theme.title)).set_bold(true);
+fn glaze::Style sty_cursor() => glaze::new_style().foreground(glaze::color_hex(g_theme.cursor)).set_bold(true);
+fn glaze::Style sty_item()   => glaze::new_style().foreground(glaze::color_hex(g_theme.item));
+fn glaze::Style sty_check()  => glaze::new_style().foreground(glaze::color_hex(g_theme.check)).set_bold(true);
+fn glaze::Style sty_done()   => glaze::new_style().foreground(glaze::color_hex(g_theme.done));
+fn glaze::Style sty_hint()   => glaze::new_style().foreground(glaze::color_hex(g_theme.hint));
+
+// --- layout scaffolding ----------------------------------------------------
+// Every screen is a title row, a blank, a filling body, and a footer pinned to
+// the bottom. The body's height drives scrolling; nothing is hand-counted.
+
+struct Frame {
+	xray::Rect title;
+	xray::Rect body;
+	xray::Rect footer;
+}
+
+fn void App.apply_bg(App* self) {
+	if (g_theme.bg.len == 0) return;
+	xray::Color c1 = xray::color_hex(g_theme.bg);
+	xray::Color c2 = g_theme.bg2.len > 0 ? xray::color_hex(g_theme.bg2) : c1;
+	self.canvas.fill_gradient_v(xray::new_rect(0, 0, self.width, self.height), c1, c2);
+}
+
+fn Frame App.frame(App* self) {
+	xray::Rect screen = xray::new_rect(0, 0, self.width, self.height);
+
+	// Outer split: bordered area fills everything except the last row (footer).
+	xray::Constraint[2] outer_cs = { xray::constraint_fill(1), xray::constraint_len(1) };
+	xray::Rect[2] outer;
+	xray::layout_v(screen, outer_cs[..], outer[..]);
+
+	// Draw border — gradient if border2 is set, solid otherwise — then inset.
+	xray::Border b = xray::rounded_border();
+	xray::Rect inner;
+	if (g_theme.border2.len > 0) {
+		inner = self.canvas.draw_gradient_border(outer[0], b,
+			xray::color_hex(g_theme.border), xray::color_hex(g_theme.border2)).inset(2, 1, 2, 1);
+	} else {
+		inner = self.canvas.draw_border(outer[0], b, border_style()).inset(2, 1, 2, 1);
+	}
+
+	// Inner split: title row, blank gap, body.
+	xray::Constraint[3] inner_cs = {
+		xray::constraint_len(1),  // title
+		xray::constraint_len(1),  // blank gap
+		xray::constraint_fill(1), // body
+	};
+	xray::Rect[3] zones;
+	xray::layout_v(inner, inner_cs[..], zones[..]);
+
+	return { zones[0], zones[2], outer[1] };
+}
+
+// Make sure the cell grid exists and matches the terminal size, then blank it.
+// The grid is owned by the App so the View we hand milktea stays valid until
+// the next frame (and we don't reallocate every render).
+fn void App.ensure_canvas(App* self) {
+	sz w = (sz)self.width;
+	sz h = (sz)self.height;
+	if (self.canvas == null) {
+		self.canvas = xray::new_screen_buffer(w, h);
+	} else if (self.canvas.width != w || self.canvas.height != h) {
+		self.canvas.resize(w, h);
+	}
+	self.canvas.clear();
+}
+
+// Draw one (possibly ANSI-styled) line at row `row` within rect `r`, clipped to
+// the rect on both axes — long names are cut, never wrapped.
+fn void App.put(App* self, xray::Rect r, int row, String ansi) {
+	if (row < 0 || row >= r.h) return;
+	self.canvas.render_ansi_string(
+		(sz)r.x, (sz)(r.y + row), ansi, xray::default_style(),
+		(sz)(r.y + r.h), (sz)(r.x + r.w));
+}
+
+fn milktea::View App.present(App* self) {
+	sz total = (sz)(self.width * self.height);
+	return milktea::new_alt_cell_view(self.canvas.cells[0:total], (sz)self.width, (sz)self.height);
+}
+
+// Keep `cursor` within a window of `visible` rows, adjusting `*scroll`.
+fn void scroll_into_view(int* scroll, int cursor, int visible) @local {
+	if (visible < 1) visible = 1;
+	if (cursor < *scroll) *scroll = cursor;
+	if (cursor >= *scroll + visible) *scroll = cursor - visible + 1;
+}
+
+// --- row builders ----------------------------------------------------------
+// Each returns a styled line; the view just places it in a rect.
+
+fn String item_line(Item* it, bool is_cursor) @local {
+	glaze::Style base = is_cursor ? sty_cursor() : sty_item();
+
+	DString box = dstring::temp();
+	box.append_string(is_cursor ? "▸ " : "  ");
+	for (int d = 0; d < it.depth * 2; d++) box.append_char(' ');
+	box.append_char('[');
+
+	DString row = dstring::temp();
+	row.append_string(base.render(box.str_view()));
+	row.append_string(it.done ? sty_check().render("✓") : base.render(" ")); // light-green tick
+	row.append_string(base.render("] "));
+	if (it.done) {
+		row.append_string("\x1b[9m"); // SGR 9 — completed text is struck through
+		row.append_string(sty_done().render(it.text.str_view()));
+	} else {
+		row.append_string(base.render(it.text.str_view()));
+	}
+	return row.str_view();
+}
+
+fn String list_line(TodoList* tl, bool is_cursor, bool editing) @local {
+	String name = editing || tl.name.len() > 0 ? tl.name.str_view() : "(unnamed)";
+	DString row = dstring::temp();
+
+	if (is_cursor) {
+		ListColor lc = list_color(tl.name.str_view());
+		glaze::Style hi = glaze::new_style()
+			.foreground(glaze::color_hex(lc.fg))
+			.background(glaze::color_hex(lc.bg))
+			.set_bold(true);
+		row.append_string(sty_cursor().render("▸ "));
+		row.append_string(hi.render(name));
+	} else {
+		row.append_string(sty_item().render(string::tformat("  %s", name)));
+	}
+
+	if (!editing) {
+		int done = 0;
+		foreach (&it : tl.items) if (it.done) done++;
+		row.append_string(sty_hint().render(string::tformat("  (%d/%d)", done, (int)tl.items.len())));
+	}
+	return row.str_view();
+}
+
+// The "create new list" row at the bottom of the list — same style as list rows.
+fn String create_line(bool is_cursor) @local {
+	glaze::Style base = is_cursor ? sty_cursor() : sty_hint();
+	DString row = dstring::temp();
+	row.append_string(base.render(is_cursor ? "▸ create new list" : "  create new list"));
+	return row.str_view();
+}
+
+// --- views -----------------------------------------------------------------
+
+fn xray::Style border_style() => { .fg = xray::color_hex(g_theme.border) };
+
+// Format a single key hint as "[key] label" with the key in title colour.
+fn String kh(String key, String label) @local {
+	DString s = dstring::temp();
+	s.append_string(sty_title().render(string::tformat("[%s]", key)));
+	s.append_string(sty_hint().render(string::tformat(" %s", label)));
+	return s.str_view();
+}
 
 fn milktea::View App.view(App* self) @dynamic {
+	self.ensure_canvas();
 	if (self.screen == Screen.SETUP) return self.view_setup();
 	if (self.screen == Screen.ITEMS) return self.view_items();
 	return self.view_lists();
 }
 
 fn milktea::View App.view_setup(App* self) {
-	glaze::Style title_s = glaze::new_style().foreground(glaze::color_hex("#ffd75f")).set_bold(true);
-	glaze::Style body_s  = glaze::new_style().foreground(glaze::color_hex("#cccccc"));
-	glaze::Style key_s   = glaze::new_style().foreground(glaze::color_hex("#87ff87")).set_bold(true);
-	glaze::Style hint_s  = glaze::new_style().foreground(glaze::color_hex("#666666"));
-
-	DString out = dstring::temp();
-	out.append_string(title_s.render("  dodo · setup"));
-	out.append_string("\n\n");
-	out.append_string(body_s.render("  iCloud Drive is available on this Mac."));
-	out.append_char('\n');
-	out.append_string(body_s.render("  Store your lists in iCloud so they sync across your Macs?"));
-	out.append_string("\n\n");
-
-	out.append_string("  ");
-	out.append_string(key_s.render("y"));
-	out.append_string(body_s.render(" — yes, use iCloud (synced)"));
-	out.append_char('\n');
-	out.append_string("  ");
-	out.append_string(key_s.render("n"));
-	out.append_string(body_s.render(" — no, keep them on this Mac"));
-	out.append_string("\n\n");
-	out.append_string(hint_s.render("  enter = iCloud · esc = decide later"));
-
-	return milktea::new_alt_screen_view(out.str_view());
+	Frame f = self.frame();
+	self.put(f.title, 0, sty_title().render("  dodo · setup"));
+	self.put(f.body, 0, sty_item().render("  iCloud Drive is available on this Mac."));
+	self.put(f.body, 1, sty_item().render("  Store your lists in iCloud so they sync across your Macs?"));
+	self.put(f.body, 3, string::tformat("  %s%s", sty_check().render("y"), sty_item().render(" — yes, use iCloud (synced)")));
+	self.put(f.body, 4, string::tformat("  %s%s", sty_check().render("n"), sty_item().render(" — no, keep them on this Mac")));
+	self.put(f.footer, 0, string::tformat(" %s  %s", kh("enter", "iCloud"), kh("esc", "decide later")));
+	self.apply_bg();
+	return self.present();
 }
 
 fn milktea::View App.view_lists(App* self) {
-	glaze::Style title_s = glaze::new_style().foreground(glaze::color_hex("#ffd75f")).set_bold(true);
-	glaze::Style hint_s  = glaze::new_style().foreground(glaze::color_hex("#666666"));
-
-	DString out = dstring::temp();
-	out.append_string(title_s.render("  dodo · lists"));
-	out.append_string("\n\n");
+	Frame f = self.frame();
+	self.put(f.title, 0, sty_title().render("  dodo · lists"));
 
 	int n = self.list_count();
-	if (n == 0) {
-		out.append_string(hint_s.render("  [press n to create one]"));
-		out.append_char('\n');
-	} else {
-		int visible = self.height - 5;
-		if (visible < 1) visible = 1;
-		if (self.list_cursor < self.list_scroll) self.list_scroll = self.list_cursor;
-		if (self.list_cursor >= self.list_scroll + visible) self.list_scroll = self.list_cursor - visible + 1;
+	bool has_spacer = n > 0;
+	int create_vi  = n + (has_spacer ? 1 : 0);
+	int total_vi   = create_vi + 1;
+	int vis_cursor = self.list_cursor < n ? self.list_cursor : create_vi;
+	scroll_into_view(&self.list_scroll, vis_cursor, f.body.h);
+	int end = self.list_scroll + f.body.h;
+	if (end > total_vi) end = total_vi;
 
-		int end = self.list_scroll + visible;
-		if (end > n) end = n;
-		for (int i = self.list_scroll; i < end; i++) {
-			TodoList* tl = self.lists.get_ref((sz)i);
-			bool is_cursor = i == self.list_cursor;
-			bool editing = self.mode == Mode.EDIT && is_cursor;
+	// Determine panes up front so list rows go into the right rect immediately.
+	bool show_preview = self.width > 80 && self.list_cursor < n;
+	xray::Rect list_pane = f.body;
+	if (show_preview) {
+		xray::Constraint[3] split_cs = {
+			xray::constraint_len(36),
+			xray::constraint_len(1),
+			xray::constraint_fill(1),
+		};
+		xray::Rect[3] panes;
+		xray::layout_h(f.body, split_cs[..], panes[..]);
+		list_pane = panes[0];
 
-			// The list's name is drawn in its own colour; the cursor row is bold.
-			ListColor lc = list_color(tl.name.str_view());
-			glaze::Style name_s = glaze::new_style().foreground(glaze::color_hex(lc.bg)).set_bold(is_cursor);
+		// Vertical divider
+		xray::Style div_sty = border_style();
+		for (int r = 0; r < panes[1].h; r++) {
+			self.canvas.set_string((sz)panes[1].x, (sz)(panes[1].y + r), "│", div_sty);
+		}
 
-			DString row = dstring::temp();
-			row.append_string(is_cursor ? "> " : "  ");
-			if (editing) {
-				row.append_string(tl.name.str_view()); // raw — the real cursor marks the caret
-			} else {
-				row.append_string(tl.name.len() > 0 ? tl.name.str_view() : "(unnamed)");
+		// Preview items in right pane
+		TodoList* ptl = self.lists.get_ref((sz)self.list_cursor);
+		int pn = (int)ptl.items.len();
+		if (pn == 0) {
+			self.put(panes[2], 0, sty_hint().render(" [empty]"));
+		} else {
+			int pend = pn < panes[2].h ? pn : panes[2].h;
+			for (int i = 0; i < pend; i++) {
+				self.put(panes[2], i, item_line(ptl.items.get_ref((sz)i), false));
 			}
-			out.append_string(name_s.render(row.str_view()));
-
-			if (!editing) {
-				int total = (int)tl.items.len();
-				int done = 0;
-				foreach (&it : tl.items) if (it.done) done++;
-				out.append_string(hint_s.render(string::tformat("  (%d/%d)", done, total)));
-			}
-			out.append_char('\n');
 		}
 	}
 
-	out.append_char('\n');
-	String help = self.mode == Mode.EDIT
-		? "  type a name · enter open · esc save name"
-		: "  ↑↓ move · enter open · n new · r rename · d delete · q quit";
-	out.append_string(hint_s.render(help));
+	// List rows into list_pane (left pane when preview shown, full body otherwise)
+	for (int vi = self.list_scroll; vi < end; vi++) {
+		int row = vi - self.list_scroll;
+		if (vi < n) {
+			bool is_cursor = vi == self.list_cursor;
+			self.put(list_pane, row,
+				list_line(self.lists.get_ref((sz)vi), is_cursor, self.mode == Mode.EDIT && is_cursor));
+		} else if (vi == create_vi) {
+			self.put(list_pane, row, create_line(self.list_cursor == n));
+		}
+		// blank spacer row (vi == n && has_spacer): nothing drawn
+	}
 
-	milktea::View v = milktea::new_alt_screen_view(out.str_view());
-	if (self.mode == Mode.EDIT && self.list_count() > 0) {
+	self.put(f.footer, 0, self.mode == Mode.EDIT
+		? string::tformat(" %s  %s  %s", kh("enter", "open"), kh("esc", "save name"), kh("backspace", "delete"))
+		: string::tformat(" %s  %s  %s  %s  %s  %s  %s", kh("↑↓", "move"), kh("enter", "open"), kh("n", "new"), kh("r", "rename"), kh("d", "delete"), kh("t", g_theme.name), kh("q", "quit")));
+
+	self.apply_bg();
+	milktea::View v = self.present();
+	if (self.mode == Mode.EDIT && n > 0) {
 		TodoList* etl = self.lists.get_ref((sz)self.list_cursor);
-		int cy = 2 + (self.list_cursor - self.list_scroll);            // title + blank line
-		int cx = 2 + glaze::string_width(etl.name.str_view());        // "> " marker
+		int cx = list_pane.x + 2 + glaze::string_width(etl.name.str_view());
+		int cy = f.body.y + (vis_cursor - self.list_scroll);
 		v = v.set_cursor_shape(cx, cy, milktea::CursorShape.CURSOR_BLOCK, true);
 	}
 	return v;
@@ -483,79 +758,41 @@ fn milktea::View App.view_items(App* self) {
 	TodoList* tl = self.cur_list();
 	if (tl == null) return self.view_lists();
 
-	glaze::Style cursor_s = glaze::new_style().foreground(glaze::color_hex("#ff5fd7")).set_bold(true);
-	glaze::Style item_s   = glaze::new_style().foreground(glaze::color_hex("#cccccc"));
-	glaze::Style check_s  = glaze::new_style().foreground(glaze::color_hex("#87ff87")).set_bold(true);
-	glaze::Style done_s   = glaze::new_style().foreground(glaze::color_hex("#5f875f"));
-	glaze::Style hint_s   = glaze::new_style().foreground(glaze::color_hex("#666666"));
+	Frame f = self.frame();
 
-	// The open list's name sits in its own colour, as a background label.
+	// The open list's name is a background label in its own colour.
 	ListColor lc = list_color(tl.name.str_view());
 	glaze::Style title_s = glaze::new_style()
 		.foreground(glaze::color_hex(lc.fg))
 		.background(glaze::color_hex(lc.bg))
 		.set_bold(true)
 		.padding(0, 1, 0, 1);
-
-	DString out = dstring::temp();
 	String name = tl.name.len() > 0 ? tl.name.str_view() : "(unnamed)";
-	out.append_string("  ");
-	out.append_string(title_s.render(name));
-	out.append_string("\n\n");
+	self.put(f.title, 0, string::tformat("  %s", title_s.render(name)));
 
 	int n = (int)tl.items.len();
 	if (n == 0) {
-		out.append_string(hint_s.render("  [press enter to add an item]"));
-		out.append_char('\n');
+		self.put(f.body, 0, sty_hint().render("  [press enter to add an item]"));
 	} else {
-		int visible = self.height - 5;
-		if (visible < 1) visible = 1;
-		if (self.item_cursor < self.item_scroll) self.item_scroll = self.item_cursor;
-		if (self.item_cursor >= self.item_scroll + visible) self.item_scroll = self.item_cursor - visible + 1;
-
-		int end = self.item_scroll + visible;
+		scroll_into_view(&self.item_scroll, self.item_cursor, f.body.h);
+		int end = self.item_scroll + f.body.h;
 		if (end > n) end = n;
 		for (int i = self.item_scroll; i < end; i++) {
-			Item* it = tl.items.get_ref((sz)i);
-			bool is_cursor = i == self.item_cursor;
-			glaze::Style base = is_cursor ? cursor_s : item_s;
-
-			// marker + indent + opening bracket, in the row's base colour.
-			DString pre = dstring::temp();
-			pre.append_string(is_cursor ? "> " : "  ");
-			for (int d = 0; d < it.depth * 2; d++) pre.append_char(' ');
-			pre.append_char('[');
-			out.append_string(base.render(pre.str_view()));
-
-			// checkbox glyph — a light-green ✓ when complete.
-			out.append_string(it.done ? check_s.render("✓") : base.render(" "));
-			out.append_string(base.render("] "));
-
-			// item text — crossed out (SGR 9) when complete.
-			DString txt = dstring::temp();
-			txt.append_string(it.text.str_view());
-			if (it.done) {
-				out.append_string("\x1b[9m");
-				out.append_string(done_s.render(txt.str_view()));
-			} else {
-				out.append_string(base.render(txt.str_view()));
-			}
-			out.append_char('\n');
+			self.put(f.body, i - self.item_scroll, item_line(tl.items.get_ref((sz)i), i == self.item_cursor));
 		}
 	}
 
-	out.append_char('\n');
-	String help = self.mode == Mode.EDIT
-		? "  type · enter new item · tab indent · ⇧tab outdent · esc done"
-		: "  ↑↓ move · space ✓ · tab indent · ⇧tab out · enter add · e edit · d del · esc back";
-	out.append_string(hint_s.render(help));
+	self.put(f.footer, 0, self.mode == Mode.EDIT
+		? string::tformat(" %s  %s  %s  %s", kh("enter", "new item"), kh("tab", "indent"), kh("⇧tab", "outdent"), kh("esc", "done"))
+		: string::tformat(" %s  %s  %s  %s  %s  %s  %s  %s", kh("↑↓", "move"), kh("space", "✓"), kh("tab", "indent"), kh("enter", "add"), kh("e", "edit"), kh("d", "del"), kh("t", g_theme.name), kh("esc", "back")));
 
-	milktea::View v = milktea::new_alt_screen_view(out.str_view());
+	self.apply_bg();
+	milktea::View v = self.present();
 	if (self.mode == Mode.EDIT) {
 		Item* eit = self.cur_item(tl);
 		if (eit != null) {
-			int cy = 2 + (self.item_cursor - self.item_scroll);                       // title + blank line
-			int cx = 6 + eit.depth * 2 + glaze::string_width(eit.text.str_view());    // "> " + indent + "[x] "
+			int cx = f.body.x + 6 + eit.depth * 2 + glaze::string_width(eit.text.str_view()); // after "> [x] "
+			int cy = f.body.y + (self.item_cursor - self.item_scroll);
 			v = v.set_cursor_shape(cx, cy, milktea::CursorShape.CURSOR_BLOCK, true);
 		}
 	}

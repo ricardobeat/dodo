@@ -85,6 +85,25 @@ fn bool load_pref(Storage* out) {
 	};
 }
 
+fn bool load_theme_idx(int* out) {
+	@pool() {
+		String path = string::tformat("%s/theme", config_dir());
+		if (!file::exists(path)) return false;
+		char[]? raw = file::load(tmem, path);
+		if (catch raw) return false;
+		*out = ((String)raw).trim().to_int() ?? 0;
+		return true;
+	};
+}
+
+fn void save_theme_idx(int idx) {
+	@pool() {
+		String dir = config_dir();
+		if (catch path::mkdir(dir, true)) {}
+		if (catch file::save(string::tformat("%s/theme", dir), string::tformat("%d\n", idx))) {}
+	};
+}
+
 fn void save_pref(Storage s) {
 	@pool() {
 		String dir = config_dir();
