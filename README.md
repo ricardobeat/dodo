@@ -1,6 +1,6 @@
 # dodo
 
-A simple terminal outliner app for lists and todos. 200KB native app.
+A native, 200KB terminal outliner app for lists and todos.
 
 ## Features
 
