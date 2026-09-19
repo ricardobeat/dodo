@@ -6,9 +6,17 @@
   "targets": {
     "dodo": {
       "type": "executable",
-      "sources": ["../bubble-tree/milktea/**", "../bubble-tree/glaze/**", "../bubble-tree/xray/**", "src/**"],
+      "sources": [
+        "../bubble-tree/milktea/**",
+        "../bubble-tree/glaze/**",
+        "../bubble-tree/xray/**",
+        "src/**"
+      ],
       "c-sources": ["../bubble-tree/milktea/tty_winsize.c"],
-      "opt": "O0"
+      "opt": "Os",
+      "optlevel": "max",
+      "optsize": "tiny",
+      "debug-info": "none"
     }
   }
 }
